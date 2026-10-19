@@ -1,0 +1,7 @@
+{
+  "name": "market-pulse-frontend",
+  "private": true,
+  "scripts": {"dev": "next dev --hostname 0.0.0.0", "build": "next build", "start": "next start --hostname 0.0.0.0"},
+  "dependencies": {"@supabase/supabase-js": "2.109.0", "next": "15.5.28", "react": "19.0.0", "react-dom": "19.0.0"},
+  "devDependencies": {"@types/node": "22.13.10", "@types/react": "19.0.10", "typescript": "5.8.2"}
+}
