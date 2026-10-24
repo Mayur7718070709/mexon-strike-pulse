@@ -120,14 +120,15 @@ class InstrumentSyncService:
                     deduplicated_rows += 1
                 else:
                     root_candidates[key] = InstrumentSyncService._root(row, "NSE_EQ", "equity")
-            elif segment == "D" and instrument in {"OPTIDX", "OPTSTK"} and inst_type == instrument:
+            elif segment == "D" and instrument in {"OPTIDX", "OPTSTK"} and inst_type in {"CE", "PE", instrument}:
                 underlying_symbol = InstrumentSyncService._text(row, "UNDERLYING_SYMBOL").upper()
                 underlying_security_id = InstrumentSyncService._security_id(row.get("UNDERLYING_SECURITY_ID"))
                 underlying_segment = "IDX_I" if instrument == "OPTIDX" else "NSE_EQ"
                 expiry = InstrumentSyncService._date(row.get("SM_EXPIRY_DATE"))
                 strike = InstrumentSyncService._decimal(row.get("STRIKE_PRICE"), required=True)
                 opt_type = (row.get("OPTION_TYPE") or "").strip().upper()
-                if not underlying_symbol or opt_type not in {"CE", "PE"} or strike < 0:
+                if (not underlying_symbol or opt_type not in {"CE", "PE"} or strike < 0
+                        or (inst_type in {"CE", "PE"} and inst_type != opt_type)):
                     continue
                 if instrument == "OPTIDX":
                     if underlying_symbol not in SUPPORTED_INDEX_OPTIONS:
