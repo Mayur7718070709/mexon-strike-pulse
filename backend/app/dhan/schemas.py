@@ -71,9 +71,9 @@ def validate_csv_master(text: str, detailed: bool = False) -> tuple[list[str], i
             break
     if not header:
         raise ValueError("Dhan instrument master CSV is empty")
-    empty_columns = [index for index, column in enumerate(header) if not column]
-    if empty_columns:
-        raise ValueError(f"Dhan instrument master CSV has unnamed header columns at positions {empty_columns[:12]}")
+    # Dhan's current detailed file includes one unnamed extra field. Keep its
+    # position explicit so row widths stay verifiable while consumers ignore it.
+    header = [column or f"__UNNAMED_{index}" for index, column in enumerate(header)]
     required = (
         {"EXCH_ID", "SEGMENT", "INSTRUMENT", "SYMBOL_NAME", "DISPLAY_NAME", "INSTRUMENT_TYPE", "SM_EXPIRY_DATE", "STRIKE_PRICE", "OPTION_TYPE"}
         if detailed

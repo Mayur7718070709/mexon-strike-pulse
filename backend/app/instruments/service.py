@@ -86,7 +86,8 @@ class InstrumentSyncService:
     def _parse(content: str) -> tuple[list[dict], list[dict], int]:
         reader = csv.DictReader(io.StringIO(content.lstrip("\ufeff")))
         if reader.fieldnames:
-            reader.fieldnames = [name.strip().lstrip("\ufeff") for name in reader.fieldnames]
+            reader.fieldnames = [name.strip().lstrip("\ufeff") or f"__UNNAMED_{index}"
+                                 for index, name in enumerate(reader.fieldnames)]
         if not reader.fieldnames or not REQUIRED_DETAILED_COLUMNS.issubset(set(reader.fieldnames)):
             raise InstrumentMasterError("Dhan detailed master is missing required documented columns or Security ID.")
         root_candidates: dict[tuple[str, str, str], dict] = {}
