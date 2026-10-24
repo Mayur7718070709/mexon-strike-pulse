@@ -49,7 +49,7 @@ class InstrumentSyncService:
                 underlying_id = await self.repository.upsert_underlying(provider_id, root, synchronized_at)
                 root_ids[(root["root_symbol"], root["exchange_segment"], root["security_id"])] = underlying_id
 
-            synced_options = 0
+            options_to_sync: list[dict] = []
             missing_underlying = 0
             expired_count = 0
             for option in options:
@@ -64,9 +64,8 @@ class InstrumentSyncService:
                 option["inactive_at"] = synchronized_at if option["is_expired"] else None
                 if option["is_expired"]:
                     expired_count += 1
-                await self.repository.upsert_option(provider_id, underlying_id, option["underlying_symbol"],
-                                                    option["expiry_date"], option, synchronized_at)
-                synced_options += 1
+                options_to_sync.append({**option, "underlying_id": underlying_id})
+            synced_options = await self.repository.upsert_options_bulk(provider_id, options_to_sync, synchronized_at)
             if not synced_options:
                 raise InstrumentMasterError("No NSE option contracts had a matching provider-confirmed underlying; prior mappings were retained.")
             await self.repository.commit()

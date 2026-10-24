@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import UUID
+import json
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,128 @@ class InstrumentRepository:
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    @staticmethod
+    def _recordset(records: list[dict], columns: tuple[tuple[str, str], ...]) -> tuple[str, str]:
+        payload = json.dumps(records, default=str, separators=(",", ":"))
+        fields = ", ".join(f"{name} {kind}" for name, kind in columns)
+        return payload, fields
+
+    async def upsert_options_bulk(self, provider_id: UUID, items: list[dict], synchronized_at: datetime) -> int:
+        """Upsert contracts in bounded Postgres batches, retaining provider IDs and idempotency."""
+        batch_size = 500
+        instrument_columns = (
+            ("provider_id", "uuid"), ("exchange_segment", "text"), ("security_id", "text"),
+            ("symbol", "text"), ("display_name", "text"), ("instrument_type", "text"),
+            ("underlying_symbol", "text"), ("expiry_date", "date"), ("strike_price", "numeric"),
+            ("option_type", "text"), ("tick_size", "numeric"), ("lot_size", "integer"),
+            ("synchronized_at", "timestamptz"), ("is_active", "boolean"),
+            ("inactive_at", "timestamptz"), ("metadata", "jsonb"),
+        )
+        expiry_columns = (
+            ("underlying_id", "uuid"), ("expiry_date", "date"), ("expiry_kind", "text"),
+            ("is_active", "boolean"), ("synchronized_at", "timestamptz"),
+        )
+        contract_columns = (
+            ("instrument_id", "uuid"), ("underlying_id", "uuid"), ("option_expiry_id", "uuid"),
+            ("strike", "numeric"), ("option_type", "text"), ("contract_symbol", "text"),
+            ("lot_size", "integer"), ("is_active", "boolean"), ("is_expired", "boolean"),
+            ("synchronized_at", "timestamptz"), ("inactive_at", "timestamptz"),
+        )
+
+        total = 0
+        for start in range(0, len(items), batch_size):
+            batch = items[start:start + batch_size]
+            instruments = [{
+                "provider_id": str(provider_id), "exchange_segment": item["exchange_segment"],
+                "security_id": item["security_id"], "symbol": item["symbol"],
+                "display_name": item["display_name"], "instrument_type": item["instrument_type"],
+                "underlying_symbol": item["underlying_symbol"], "expiry_date": item["expiry_date"].isoformat(),
+                "strike_price": str(item["strike_price"]), "option_type": item["option_type"],
+                "tick_size": str(item["tick_size"]) if item["tick_size"] is not None else None,
+                "lot_size": item["lot_size"], "synchronized_at": synchronized_at.isoformat(),
+                "is_active": item["is_active"],
+                "inactive_at": item["inactive_at"].isoformat() if item["inactive_at"] else None,
+                "metadata": json.loads(item["metadata"]),
+            } for item in batch]
+            records, fields = self._recordset(instruments, instrument_columns)
+            result = await self.session.execute(text(f"""
+                insert into public.instruments
+                  (provider_id, exchange_segment, security_id, symbol, display_name, asset_type,
+                   instrument_type, underlying_symbol, expiry_date, strike_price, option_type,
+                   tick_size, lot_size, source, synchronized_at, is_active, inactive_at, metadata)
+                select x.provider_id, x.exchange_segment, x.security_id, x.symbol, x.display_name, 'option',
+                       x.instrument_type, x.underlying_symbol, x.expiry_date, x.strike_price, x.option_type,
+                       x.tick_size, x.lot_size, 'DHANHQ', x.synchronized_at, x.is_active, x.inactive_at, x.metadata
+                from jsonb_to_recordset(cast(:records as jsonb)) as x({fields})
+                on conflict (provider_id, exchange_segment, security_id) do update set
+                  symbol = excluded.symbol, display_name = excluded.display_name, asset_type = 'option',
+                  instrument_type = excluded.instrument_type, underlying_symbol = excluded.underlying_symbol,
+                  expiry_date = excluded.expiry_date, strike_price = excluded.strike_price,
+                  option_type = excluded.option_type, tick_size = excluded.tick_size, lot_size = excluded.lot_size,
+                  source = 'DHANHQ', synchronized_at = excluded.synchronized_at, is_active = excluded.is_active,
+                  inactive_at = excluded.inactive_at, metadata = excluded.metadata, updated_at = now()
+                returning security_id, id
+            """), {"records": records})
+            instrument_ids = {row["security_id"]: row["id"] for row in result.mappings()}
+
+            expiry_by_key: dict[tuple[UUID, date, str], dict] = {}
+            for item in batch:
+                key = (item["underlying_id"], item["expiry_date"], item["expiry_kind"])
+                expiry_by_key[key] = {
+                    "underlying_id": str(key[0]), "expiry_date": key[1].isoformat(),
+                    "expiry_kind": key[2], "is_active": item["is_active"],
+                    "synchronized_at": synchronized_at.isoformat(),
+                }
+            records, fields = self._recordset(list(expiry_by_key.values()), expiry_columns)
+            result = await self.session.execute(text(f"""
+                insert into public.option_expiries
+                  (underlying_id, expiry_date, expiry_kind, is_active, source, synchronized_at)
+                select x.underlying_id, x.expiry_date, x.expiry_kind, x.is_active, 'DHANHQ', x.synchronized_at
+                from jsonb_to_recordset(cast(:records as jsonb)) as x({fields})
+                on conflict (underlying_id, expiry_date, expiry_kind) do update set
+                  is_active = excluded.is_active, source = 'DHANHQ',
+                  synchronized_at = excluded.synchronized_at, updated_at = now()
+                returning underlying_id, expiry_date, expiry_kind, id
+            """), {"records": records})
+            expiry_ids = {(str(row["underlying_id"]), row["expiry_date"], row["expiry_kind"]): row["id"]
+                          for row in result.mappings()}
+
+            contracts = []
+            seen_contracts: set[tuple[UUID, UUID, Decimal, str]] = set()
+            for item in batch:
+                expiry_key = (str(item["underlying_id"]), item["expiry_date"], item["expiry_kind"])
+                option_type = item["option_type"].lower()
+                contract_key = (item["underlying_id"], expiry_ids[expiry_key], item["strike_price"], option_type)
+                if contract_key in seen_contracts:
+                    continue
+                seen_contracts.add(contract_key)
+                contracts.append({
+                    "instrument_id": str(instrument_ids[item["security_id"]]),
+                    "underlying_id": str(item["underlying_id"]), "option_expiry_id": str(expiry_ids[expiry_key]),
+                    "strike": str(item["strike_price"]), "option_type": option_type,
+                    "contract_symbol": item["display_name"], "lot_size": item["lot_size"],
+                    "is_active": item["is_active"], "is_expired": item["is_expired"],
+                    "synchronized_at": synchronized_at.isoformat(),
+                    "inactive_at": item["inactive_at"].isoformat() if item["inactive_at"] else None,
+                })
+            records, fields = self._recordset(contracts, contract_columns)
+            await self.session.execute(text(f"""
+                insert into public.option_contracts
+                  (instrument_id, underlying_id, option_expiry_id, strike, option_type, contract_symbol,
+                   lot_size, is_active, is_expired, source, synchronized_at, inactive_at)
+                select x.instrument_id, x.underlying_id, x.option_expiry_id, x.strike, x.option_type,
+                       x.contract_symbol, x.lot_size, x.is_active, x.is_expired, 'DHANHQ',
+                       x.synchronized_at, x.inactive_at
+                from jsonb_to_recordset(cast(:records as jsonb)) as x({fields})
+                on conflict (underlying_id, option_expiry_id, strike, option_type) do update set
+                  instrument_id = excluded.instrument_id, contract_symbol = excluded.contract_symbol,
+                  lot_size = excluded.lot_size, is_active = excluded.is_active, is_expired = excluded.is_expired,
+                  source = 'DHANHQ', synchronized_at = excluded.synchronized_at,
+                  inactive_at = excluded.inactive_at, updated_at = now()
+            """), {"records": records})
+            total += len(batch)
+        return total
 
     async def ensure_provider(self) -> UUID:
         result = await self.session.execute(text("""
