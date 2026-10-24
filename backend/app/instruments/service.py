@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import re
+from collections import Counter
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -94,6 +95,8 @@ class InstrumentSyncService:
         option_rows: dict[tuple[str, str, str], dict] = {}
         index_option_symbols: set[str] = set()
         stock_option_symbols: set[str] = set()
+        instrument_classes: Counter[tuple[str, str, str, str]] = Counter()
+        derivative_underlyings: set[tuple[str, str, str]] = set()
         source_count = 0
         deduplicated_rows = 0
 
@@ -104,6 +107,7 @@ class InstrumentSyncService:
             exch, segment = (row.get("EXCH_ID") or "").strip().upper(), (row.get("SEGMENT") or "").strip().upper()
             instrument = (row.get("INSTRUMENT") or "").strip().upper()
             inst_type = (row.get("INSTRUMENT_TYPE") or "").strip().upper()
+            instrument_classes[(exch, segment, instrument, inst_type)] += 1
             symbol = InstrumentSyncService._text(row, "SYMBOL_NAME").upper()
             if exch != "NSE":
                 continue
@@ -124,6 +128,7 @@ class InstrumentSyncService:
                 underlying_symbol = InstrumentSyncService._text(row, "UNDERLYING_SYMBOL").upper()
                 underlying_security_id = InstrumentSyncService._security_id(row.get("UNDERLYING_SECURITY_ID"))
                 underlying_segment = "IDX_I" if instrument == "OPTIDX" else "NSE_EQ"
+                derivative_underlyings.add((underlying_symbol, underlying_segment, underlying_security_id))
                 expiry = InstrumentSyncService._date(row.get("SM_EXPIRY_DATE"))
                 strike = InstrumentSyncService._decimal(row.get("STRIKE_PRICE"), required=True)
                 opt_type = (row.get("OPTION_TYPE") or "").strip().upper()
@@ -169,6 +174,20 @@ class InstrumentSyncService:
                          if (item["underlying_symbol"], item["underlying_segment"], item["underlying_security_id"]) in allowed_keys]
         if source_count == 0:
             raise InstrumentMasterError("Dhan detailed instrument master is empty.")
+        log.info(
+            "dhan_instrument_master_parse_summary",
+            rows=source_count,
+            instrument_classes=[{"exchange": key[0], "segment": key[1], "instrument": key[2],
+                                 "instrument_type": key[3], "count": count}
+                                for key, count in instrument_classes.most_common(24)],
+            root_candidates=len(root_candidates),
+            root_symbols=sorted({item["root_symbol"] for item in root_candidates.values()})[:24],
+            derivative_underlyings=sorted(symbol for symbol, _, _ in derivative_underlyings)[:24],
+            index_option_symbols=sorted(index_option_symbols),
+            stock_option_symbols=sorted(stock_option_symbols)[:24],
+            option_rows=len(option_rows),
+            matched_option_rows=len(valid_options),
+        )
         return eligible_roots, valid_options, deduplicated_rows
 
     @staticmethod
