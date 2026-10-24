@@ -63,13 +63,17 @@ class CandleResponse(BaseModel):
 def validate_csv_master(text: str, detailed: bool = False) -> tuple[list[str], int]:
     # Dhan's downloadable UTF-8 CSV may include a BOM and padded header cells.
     reader = csv.reader(io.StringIO(text.lstrip("\ufeff")))
-    try:
-        header = next(reader)
-    except StopIteration as exc:
-        raise ValueError("Dhan instrument master CSV is empty") from exc
-    header = [column.strip().lstrip("\ufeff") for column in header]
-    if not header or any(not column for column in header):
-        raise ValueError("Dhan instrument master CSV has an invalid header")
+    header: list[str] = []
+    for candidate in reader:
+        candidate = [column.strip().lstrip("\ufeff") for column in candidate]
+        if candidate and any(candidate):
+            header = candidate
+            break
+    if not header:
+        raise ValueError("Dhan instrument master CSV is empty")
+    empty_columns = [index for index, column in enumerate(header) if not column]
+    if empty_columns:
+        raise ValueError(f"Dhan instrument master CSV has unnamed header columns at positions {empty_columns[:12]}")
     required = (
         {"EXCH_ID", "SEGMENT", "INSTRUMENT", "SYMBOL_NAME", "DISPLAY_NAME", "INSTRUMENT_TYPE", "SM_EXPIRY_DATE", "STRIKE_PRICE", "OPTION_TYPE"}
         if detailed
