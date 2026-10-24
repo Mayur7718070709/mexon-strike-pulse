@@ -435,7 +435,8 @@ async def sync_instruments(request: Request, _admin: dict = Depends(require_admi
         raise HTTPException(status_code=503, detail="Dhan instrument master is currently unavailable") from exc
     except Exception as exc:
         await session.rollback()
-        log.error("dhan_instrument_sync_failed", error_type=type(exc).__name__)
+        safe_detail = str(exc)[:180] if isinstance(exc, (DhanInvalidResponse, InstrumentMasterError)) else type(exc).__name__
+        log.error("dhan_instrument_sync_failed", error_type=type(exc).__name__, detail=safe_detail)
         raise HTTPException(status_code=502, detail="Dhan instrument master synchronization failed") from exc
 
 
