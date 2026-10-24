@@ -199,7 +199,10 @@ class InstrumentSyncService:
     @staticmethod
     def _integer(value: str | None):
         raw = (value or "").strip()
-        if not raw:
+        # Dhan's detailed master can use 0 when a lot size does not apply
+        # (notably for underlying index/root rows). The field is optional;
+        # zero is not a valid tradable lot size and must remain unavailable.
+        if not raw or raw == "0":
             return None
         if not raw.isdigit() or int(raw) <= 0:
             raise InstrumentMasterError("Dhan master contains an invalid lot size.")
