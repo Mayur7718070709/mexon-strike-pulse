@@ -118,13 +118,13 @@ class InstrumentSyncService:
                     deduplicated_rows += 1
                 else:
                     root_candidates[key] = InstrumentSyncService._root(row, "IDX_I", "index")
-            elif segment == "E" and instrument == "EQUITY" and inst_type == "EQUITY":
+            elif segment == "E" and instrument == "EQUITY":
                 key = (symbol, "NSE_EQ", security_id)
                 if key in root_candidates:
                     deduplicated_rows += 1
                 else:
                     root_candidates[key] = InstrumentSyncService._root(row, "NSE_EQ", "equity")
-            elif segment == "D" and instrument in {"OPTIDX", "OPTSTK"} and inst_type in {"CE", "PE", instrument}:
+            elif segment == "D" and instrument in {"OPTIDX", "OPTSTK"} and inst_type in {"OP", "CE", "PE", instrument}:
                 underlying_symbol = InstrumentSyncService._text(row, "UNDERLYING_SYMBOL").upper()
                 underlying_security_id = InstrumentSyncService._security_id(row.get("UNDERLYING_SECURITY_ID"))
                 underlying_segment = "IDX_I" if instrument == "OPTIDX" else "NSE_EQ"
