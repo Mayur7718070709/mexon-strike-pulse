@@ -228,14 +228,14 @@ class DhanProvider(MarketDataProvider):
         try:
             validate_csv_master(data["content"], detailed=detailed)
         except ValueError as exc:
-            raise DhanInvalidResponse("Dhan instrument master CSV is malformed.") from exc
+            raise DhanInvalidResponse(f"Dhan instrument master CSV validation failed: {exc}") from exc
 
     async def _fetch_master(self) -> dict[str, Any]:
         text, _ = await self.rest.download_instrument_master_csv()
         try:
             header, row_count = validate_csv_master(text)
         except ValueError as exc:
-            raise DhanInvalidResponse("Dhan instrument master CSV is malformed.") from exc
+            raise DhanInvalidResponse(f"Dhan instrument master CSV validation failed: {exc}") from exc
         return {"format": "csv", "content": text, "columns": header, "row_count": row_count}
 
     async def _fetch_master_detailed(self) -> dict[str, Any]:
@@ -243,7 +243,7 @@ class DhanProvider(MarketDataProvider):
         try:
             header, row_count = validate_csv_master(text, detailed=True)
         except ValueError as exc:
-            raise DhanInvalidResponse("Dhan instrument master CSV is malformed.") from exc
+            raise DhanInvalidResponse(f"Dhan instrument master CSV validation failed: {exc}") from exc
         return {"format": "csv", "content": text, "columns": header, "row_count": row_count}
 
     async def stream_market_data(self, instruments: list[tuple[str, str]], mode: str = "ticker") -> AsyncIterator[dict[str, Any]]:
