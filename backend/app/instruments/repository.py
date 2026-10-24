@@ -21,7 +21,11 @@ class InstrumentRepository:
 
     async def upsert_options_bulk(self, provider_id: UUID, items: list[dict], synchronized_at: datetime) -> int:
         """Upsert contracts in bounded Postgres batches, retaining provider IDs and idempotency."""
-        batch_size = 500
+        # Dhan's detailed master can contain tens of thousands of supported
+        # NSE option contracts. Larger bounded batches avoid hundreds of
+        # network round trips on low-resource hosted databases while keeping
+        # each JSONB recordset request to a manageable size.
+        batch_size = 5000
         instrument_columns = (
             ("provider_id", "uuid"), ("exchange_segment", "text"), ("security_id", "text"),
             ("symbol", "text"), ("display_name", "text"), ("instrument_type", "text"),
