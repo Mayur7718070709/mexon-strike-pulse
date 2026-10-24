@@ -11,7 +11,7 @@ The sync reads Dhan's official **detailed instrument CSV** (`api-scrip-master-de
 | exchange segment | `EXCH_ID` + `SEGMENT`: NSE/I → `IDX_I`, NSE/E → `NSE_EQ`, NSE/D → `NSE_FNO` |
 | security ID | `SECURITY_ID`; digits only, positive; retained as text in database |
 | instrument type | `INSTRUMENT` and `INSTRUMENT_TYPE`; only matching `INDEX`, `EQUITY`, `OPTIDX`, `OPTSTK` accepted |
-| underlying | `UNDERLYING_SYMBOL` + `UNDERLYING_SECURITY_ID`, joined to an actual NSE index/equity row in the same master |
+| underlying | `UNDERLYING_SYMBOL` + `UNDERLYING_SECURITY_ID` declared on the Dhan derivative row; use an exact matching NSE root row when present |
 | expiry | `SM_EXPIRY_DATE`, ISO date prefix only |
 | strike | `STRIKE_PRICE`, finite decimal |
 | option type | `OPTION_TYPE`: `CE` → call, `PE` → put |
@@ -19,7 +19,7 @@ The sync reads Dhan's official **detailed instrument CSV** (`api-scrip-master-de
 | expiry kind | `EXPIRY_FLAG`: `W` → weekly, `M` → monthly; otherwise regular |
 | source and sync time | source `DHANHQ`; `synchronized_at` is this backend's UTC ingestion time. The CSV has no row-level exchange event timestamp, so `provider_timestamp` remains null. |
 
-The supported index roots are NIFTY, BANKNIFTY, FINNIFTY and MIDCPNIFTY. NSE stock option contracts (`OPTSTK`) are kept only when their underlying equity and exact underlying security ID are also present in the master. Other exchanges, segments, instrument types and unsupported roots are excluded. MCX options are not admitted to the expired-options workflow.
+The supported index roots are NIFTY, BANKNIFTY, FINNIFTY and MIDCPNIFTY. NSE stock option contracts (`OPTSTK`) are mapped using the official underlying symbol/security-ID pair on each Dhan derivative row. When the file also contains an exact NSE root row it supplies display metadata; if that row is absent or has a different symbol alias, the provider-declared derivative identity is retained with unavailable tick/lot metadata. No security ID or exchange segment is inferred. Other exchanges, segments, instrument types and unsupported roots are excluded. MCX options are not admitted to the expired-options workflow.
 
 Rows are deduplicated by `(exchange segment, security ID, instrument type)`. Existing mappings are never deleted: an authoritative complete sync marks absent rows inactive, while expiry dates before the UTC sync date are marked expired. Provider IDs and prior symbol/expiry/strike/type fields remain on inactive instrument rows for historical joins. The update is transactional; a failed fetch, invalid master, or unusable result rolls back and leaves the last successful mapping intact.
 

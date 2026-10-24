@@ -92,6 +92,7 @@ class InstrumentSyncService:
             raise InstrumentMasterError("Dhan detailed master is missing required documented columns or Security ID.")
         root_candidates: dict[tuple[str, str, str], dict] = {}
         option_rows: dict[tuple[str, str, str], dict] = {}
+        derivative_roots: dict[tuple[str, str, str], dict] = {}
         index_option_symbols: set[str] = set()
         stock_option_symbols: set[str] = set()
         instrument_classes: Counter[tuple[str, str, str, str]] = Counter()
@@ -140,6 +141,28 @@ class InstrumentSyncService:
                     index_option_symbols.add(underlying_symbol)
                 else:
                     stock_option_symbols.add(underlying_symbol)
+                # Dhan documents UNDERLYING_SECURITY_ID and UNDERLYING_SYMBOL as
+                # the derivative's underlying identity. Some valid stock-option
+                # rows have no matching equity row in the detailed file, so use
+                # this provider-declared pair instead of dropping those contracts.
+                root_key = (underlying_symbol, underlying_segment, underlying_security_id)
+                derivative_roots.setdefault(root_key, {
+                    "exchange_segment": underlying_segment,
+                    "security_id": underlying_security_id,
+                    "symbol": underlying_symbol,
+                    "display_name": underlying_symbol,
+                    "asset_type": "index" if instrument == "OPTIDX" else "equity",
+                    "instrument_type": "INDEX" if instrument == "OPTIDX" else "EQUITY",
+                    "underlying_symbol": underlying_symbol,
+                    "root_symbol": underlying_symbol,
+                    "tick_size": None,
+                    "lot_size": None,
+                    "metadata": json.dumps({
+                        "exchange": "NSE",
+                        "identity_source": "DHANHQ_UNDERLYING_SECURITY_ID",
+                        "master_segment": segment,
+                    }),
+                })
                 item = {
                     "exchange_segment": "NSE_FNO", "security_id": security_id,
                     "symbol": symbol or InstrumentSyncService._text(row, "DISPLAY_NAME"),
@@ -161,14 +184,21 @@ class InstrumentSyncService:
                 else:
                     option_rows[key] = item
 
-        # Only keep underlyings that are supported and evidenced by both instrument rows.
+        # Prefer a matching NSE root row. When Dhan's option row declares an
+        # underlying ID but the root row is absent/misaligned, the documented
+        # underlying fields remain provider evidence for the identity.
         eligible_roots = []
+        root_keys = set()
         for root in root_candidates.values():
-            if root["instrument_type"] == "INDEX" and root["root_symbol"] in index_option_symbols:
+            key = (root["root_symbol"], root["exchange_segment"], root["security_id"])
+            if key in derivative_roots:
                 eligible_roots.append(root)
-            elif root["instrument_type"] == "EQUITY" and root["root_symbol"] in stock_option_symbols:
+                root_keys.add(key)
+        for key, root in derivative_roots.items():
+            if key not in root_keys:
                 eligible_roots.append(root)
-        allowed_keys = {(r["root_symbol"], r["exchange_segment"], r["security_id"]) for r in eligible_roots}
+                root_keys.add(key)
+        allowed_keys = root_keys
         valid_options = [item for item in option_rows.values()
                          if (item["underlying_symbol"], item["underlying_segment"], item["underlying_security_id"]) in allowed_keys]
         if source_count == 0:
@@ -180,6 +210,11 @@ class InstrumentSyncService:
                                  "instrument_type": key[3], "count": count}
                                 for key, count in instrument_classes.most_common(24)],
             root_candidates=len(root_candidates),
+            derivative_root_identities=len(derivative_roots),
+            fallback_root_identities=sum(1 for key in derivative_roots if key not in {
+                (root["root_symbol"], root["exchange_segment"], root["security_id"])
+                for root in root_candidates.values()
+            }),
             root_symbols=sorted({item["root_symbol"] for item in root_candidates.values()})[:24],
             derivative_underlyings=sorted(symbol for symbol, _, _ in derivative_underlyings)[:24],
             index_option_symbols=sorted(index_option_symbols),
