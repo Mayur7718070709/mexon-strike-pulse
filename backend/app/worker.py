@@ -4,6 +4,7 @@ import time
 
 from arq import cron
 from arq.connections import RedisSettings
+from arq.worker import Worker
 from sqlalchemy import text
 
 from app.config import get_settings
@@ -39,12 +40,13 @@ async def shutdown(ctx):
     client = ctx.get("dhan_client")
     if client:
         await client.close()
-    redis = ctx.get("redis_client")
-    if redis:
-        await redis.aclose()
-    from app.database import engine
-    if engine is not None:
-        await engine.dispose()
+    if not ctx.get("embedded"):
+        redis = ctx.get("redis_client")
+        if redis:
+            await redis.aclose()
+        from app.database import engine
+        if engine is not None:
+            await engine.dispose()
 
 
 async def run_historical_ingestion(ctx, job_id: str):
@@ -128,3 +130,19 @@ class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     cron_jobs = [cron(recover_stale_historical_jobs, minute=set(range(0, 60, 5)), run_at_startup=True),
                  cron(recover_stale_expired_options_jobs, minute=set(range(1, 60, 5)), run_at_startup=True)]
+
+
+def create_embedded_worker() -> Worker:
+    """Build the same ARQ worker used by the standalone service for in-process hosting."""
+    return Worker(
+        functions=WorkerSettings.functions,
+        cron_jobs=WorkerSettings.cron_jobs,
+        redis_settings=WorkerSettings.redis_settings,
+        on_startup=WorkerSettings.on_startup,
+        on_shutdown=WorkerSettings.on_shutdown,
+        max_jobs=WorkerSettings.max_jobs,
+        job_timeout=WorkerSettings.job_timeout,
+        max_tries=WorkerSettings.max_tries,
+        handle_signals=False,
+        ctx={"embedded": True},
+    )

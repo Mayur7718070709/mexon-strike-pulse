@@ -62,7 +62,22 @@ async def lifespan(app: FastAPI):
         monitor_target_staleness(redis, settings.market_data_stale_after_seconds),
         name="target-staleness-monitor",
     )
+    embedded_worker = None
+    embedded_worker_task = None
+    if settings.embedded_worker_enabled:
+        from app.worker import create_embedded_worker
+        embedded_worker = create_embedded_worker()
+        embedded_worker_task = asyncio.create_task(
+            embedded_worker.async_run(), name="embedded-arq-worker"
+        )
     yield
+    if embedded_worker is not None:
+        await embedded_worker.close()
+    if embedded_worker_task is not None:
+        try:
+            await embedded_worker_task
+        except asyncio.CancelledError:
+            pass
     for task in (feed_task, target_staleness_task):
         task.cancel()
     for task in (feed_task, target_staleness_task):

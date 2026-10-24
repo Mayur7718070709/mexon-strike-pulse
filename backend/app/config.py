@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     dhan_instruments: str = ""
     dhan_feed_mode: str = "ticker"
     market_data_stale_after_seconds: int = 15
+    embedded_worker_enabled: bool = False
     supabase_url: str = ""
     supabase_anon_key: str = ""
 
