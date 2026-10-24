@@ -69,3 +69,36 @@ export function HistoricalAdminPanel({ accessToken, apiBase }: Props) {
     </div>}
   </section>;
 }
+
+type InstrumentSyncResult = {
+  status: string; source: string; synchronized_at: string; roots: number; option_contracts: number;
+  expired_contracts: number; unresolved_underlying_contracts: number; deduplicated_rows: number;
+};
+
+export function InstrumentSyncPanel({ accessToken, apiBase }: Props) {
+  const [result, setResult] = useState<InstrumentSyncResult | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const synchronize = async () => {
+    setBusy(true); setError(""); setResult(null);
+    try {
+      const response = await authenticatedFetch(`${apiBase}/admin/instruments/sync`, {
+        method: "POST", cache: "no-store", headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail ?? "Instrument synchronization failed.");
+      setResult(body as InstrumentSyncResult);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Instrument synchronization is unavailable.");
+    } finally { setBusy(false); }
+  };
+
+  return <section className="historical-admin" aria-labelledby="instrument-sync-title">
+    <div className="historical-admin-heading"><div><p className="eyebrow">ADMIN · DHANHQ</p><h2 id="instrument-sync-title">Instrument master synchronization</h2></div><span className="source-label">OFFICIAL PROVIDER RECORDS</span></div>
+    <p className="historical-note">Fetches Dhan’s detailed instrument master and stores only supported, provider-confirmed NSE mappings. Existing mappings are retained if validation fails.</p>
+    <button type="button" className="instrument-sync-button" onClick={() => void synchronize()} disabled={busy}>{busy ? "Synchronizing…" : "Sync Dhan instrument master"}</button>
+    {error && <p className="auth-error" role="alert">{error}</p>}
+    {result && <div className="historical-result" role="status" aria-live="polite"><div className="historical-job-line"><strong>SYNC {result.status.toUpperCase()}</strong><span>{result.source} · {new Date(result.synchronized_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</span></div><p>{result.roots} provider-confirmed underlyings · {result.option_contracts} option contracts · {result.expired_contracts} expired · {result.deduplicated_rows} duplicate rows removed</p>{result.unresolved_underlying_contracts > 0 && <p className="historical-failure">{result.unresolved_underlying_contracts} option rows had no matching official underlying mapping and were skipped.</p>}</div>}
+  </section>;
+}

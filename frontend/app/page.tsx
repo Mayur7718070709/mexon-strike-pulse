@@ -5,7 +5,7 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import { authenticatedFetch } from "../lib/api";
 import { OptionChainPanel } from "./option-chain";
-import { HistoricalAdminPanel } from "./historical-admin";
+import { HistoricalAdminPanel, InstrumentSyncPanel } from "./historical-admin";
 import { PastPresentNextFuturePanel } from "./analysis";
 import { AlertsPanel, ScannerPanel, TargetTrackerPanel, WatchlistPanel } from "./product-panels";
 
@@ -206,7 +206,7 @@ export default function Home() {
         {screen === "watchlist" && <WatchlistPanel accessToken={session.access_token} apiBase={apiBase} />}
         {screen === "scanner" && <ScannerPanel accessToken={session.access_token} apiBase={apiBase} />}
         {screen === "analysis" && <PastPresentNextFuturePanel accessToken={session.access_token} apiBase={apiBase} />}
-        {screen === "historical" && (isAdmin ? <HistoricalAdminPanel accessToken={session.access_token} apiBase={apiBase} /> : unavailableFeature("Historical analysis and coverage", "GET /api/v1/admin/historical/coverage"))}
+        {screen === "historical" && (isAdmin ? <><InstrumentSyncPanel accessToken={session.access_token} apiBase={apiBase} /><HistoricalAdminPanel accessToken={session.access_token} apiBase={apiBase} /></> : unavailableFeature("Historical analysis and coverage", "GET /api/v1/admin/historical/coverage"))}
         {screen === "targets" && <TargetTrackerPanel accessToken={session.access_token} apiBase={apiBase} />}
         {screen === "alerts" && <AlertsPanel accessToken={session.access_token} apiBase={apiBase} streamStatus={alertStream} />}
         {screen === "profile" && <section className="workspace-panel profile-panel"><div className="content-heading"><div><p className="eyebrow">AUTHENTICATED ACCOUNT</p><h2>Profile</h2></div><span className="status-tag tag-live">SUPABASE AUTH</span></div><dl><div><dt>Email</dt><dd>{session.user.email ?? "Unavailable"}</dd></div><div><dt>User ID</dt><dd>{session.user.id}</dd></div><div><dt>Session</dt><dd>Protected Supabase session · expires {formatTime(session.expires_at ? new Date(session.expires_at * 1000).toISOString() : undefined)}</dd></div></dl><button type="button" className="secondary-button" onClick={() => void supabase?.auth.signOut()}>Sign out securely</button></section>}
