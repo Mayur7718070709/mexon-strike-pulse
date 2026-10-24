@@ -12,6 +12,20 @@ import { AlertsPanel, ScannerPanel, TargetTrackerPanel, WatchlistPanel } from ".
 type Screen = "dashboard" | "market" | "options" | "scanner" | "historical" | "analysis" | "watchlist" | "targets" | "alerts" | "profile" | "settings";
 type Quote = { security_id: string; exchange_segment: string; last_price: number; exchange_timestamp: string; received_at: string; status: "LIVE" | "DATA STALE" };
 type MarketStatus = { status: "LIVE" | "DATA STALE" | "CONNECTION LOST" | "DATA UNAVAILABLE"; source: string; quotes: Quote[]; message?: string };
+type DhanStatus = {
+  provider: string;
+  status: string;
+  connected: boolean;
+  checked_at: string;
+  message: string;
+  feed: { connected: boolean; last_event_at?: string | null; last_error_type?: string | null };
+  token_expires_at?: string | null;
+  active_segments?: string | null;
+  data_plan_status?: string | null;
+  data_valid_until?: string | null;
+  last_received_at?: string | null;
+  feed_data_quality?: string | null;
+};
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
 const navigation: { id: Screen; label: string; icon: string; group: string }[] = [
@@ -196,7 +210,7 @@ export default function Home() {
         {screen === "targets" && <TargetTrackerPanel accessToken={session.access_token} apiBase={apiBase} />}
         {screen === "alerts" && <AlertsPanel accessToken={session.access_token} apiBase={apiBase} streamStatus={alertStream} />}
         {screen === "profile" && <section className="workspace-panel profile-panel"><div className="content-heading"><div><p className="eyebrow">AUTHENTICATED ACCOUNT</p><h2>Profile</h2></div><span className="status-tag tag-live">SUPABASE AUTH</span></div><dl><div><dt>Email</dt><dd>{session.user.email ?? "Unavailable"}</dd></div><div><dt>User ID</dt><dd>{session.user.id}</dd></div><div><dt>Session</dt><dd>Protected Supabase session · expires {formatTime(session.expires_at ? new Date(session.expires_at * 1000).toISOString() : undefined)}</dd></div></dl><button type="button" className="secondary-button" onClick={() => void supabase?.auth.signOut()}>Sign out securely</button></section>}
-        {screen === "settings" && <>{unavailableFeature("Personal preferences", "GET /api/v1/user/preferences")}<section className="workspace-panel settings-security"><p className="eyebrow">SESSION SECURITY</p><h2>Authentication</h2><p>Market API requests use your Supabase access token. Expired or rejected sessions return to sign-in. Dhan credentials remain on the backend.</p><button type="button" className="secondary-button" onClick={() => void supabase?.auth.signOut()}>Sign out securely</button></section></>}
+        {screen === "settings" && <><DhanStatusPanel accessToken={session.access_token} apiBase={apiBase} />{unavailableFeature("Personal preferences", "GET /api/v1/user/preferences")}<section className="workspace-panel settings-security"><p className="eyebrow">SESSION SECURITY</p><h2>Authentication</h2><p>Market API requests use your Supabase access token. Expired or rejected sessions return to sign-in. Dhan credentials remain on the backend.</p><button type="button" className="secondary-button" onClick={() => void supabase?.auth.signOut()}>Sign out securely</button></section></>}
       </div>
       <footer className="app-footer"><span>© 2026 Mexon Intelligence Pvt Ltd</span><span><i className={`status-indicator state-${status.toLowerCase().replaceAll(" ", "-")}`} />{status} · DhanHQ v2</span></footer>
       {latestAlert && <aside className="target-alert-toast" role="status" aria-live="assertive"><span aria-hidden="true">◆</span><div><strong>{latestAlert.title}</strong><p>{latestAlert.body}</p><button type="button" className="text-button" onClick={() => { setScreen("alerts"); setLatestAlert(null); }}>Open alerts</button></div><button type="button" className="toast-dismiss" aria-label="Dismiss alert notification" onClick={() => setLatestAlert(null)}>×</button></aside>}
@@ -208,6 +222,46 @@ export default function Home() {
 
 function EmptyState({ title, message, status }: { title: string; message: string; status: string }) {
   return <div className="empty-state-panel" role="status" aria-live="polite"><span className="empty-state-mark">⌁</span><div><strong>{title}</strong><p>{message}</p></div><span className="status-tag">{status}</span></div>;
+}
+
+function DhanStatusPanel({ accessToken, apiBase }: { accessToken: string; apiBase: string }) {
+  const [result, setResult] = useState<DhanStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    void authenticatedFetch(`${apiBase}/integrations/dhan/status`, {
+      cache: "no-store",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(response.status === 401 ? "Market Pulse session expired. Sign in again to check Dhan." : `Status check failed (HTTP ${response.status}).`);
+      const data = await response.json() as DhanStatus;
+      if (active) setResult(data);
+    }).catch((reason: unknown) => {
+      if (active) setError(reason instanceof Error ? reason.message : "Dhan status is unavailable.");
+    }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [accessToken, apiBase, attempt]);
+
+  return <section className="workspace-panel dhan-status-panel">
+    <div className="content-heading"><div><p className="eyebrow">SERVER-SIDE PROVIDER CHECK</p><h2>DhanHQ connection</h2></div><button type="button" className="secondary-button" onClick={() => setAttempt((value) => value + 1)} disabled={loading}>{loading ? "Checking…" : "Check again"}</button></div>
+    {error ? <div className="empty-state-panel" role="status"><div><strong>DATA UNAVAILABLE</strong><p>{error}</p></div></div> : loading && !result ? <div className="empty-state-panel" role="status"><div><strong>LOADING</strong><p>Checking Dhan profile through the Market Pulse backend.</p></div></div> : result ? <>
+      <div className="dhan-status-message"><span className={`status-tag ${result.connected ? "tag-live" : ""}`}>{result.status}</span><p>{result.message}</p></div>
+      <dl className="dhan-status-details">
+        <div><dt>Data plan</dt><dd>{result.data_plan_status ?? "Unavailable"}</dd></div>
+        <div><dt>Data valid until</dt><dd>{formatTime(result.data_valid_until ?? undefined)}</dd></div>
+        <div><dt>Token expires</dt><dd>{formatTime(result.token_expires_at ?? undefined)}</dd></div>
+        <div><dt>Active segments</dt><dd>{result.active_segments ?? "Unavailable"}</dd></div>
+        <div><dt>Live feed</dt><dd>{result.feed?.connected ? "CONNECTED" : result.feed?.last_error_type ? `DISCONNECTED (${result.feed.last_error_type})` : "NOT RECEIVING"}</dd></div>
+        <div><dt>Last observation</dt><dd>{formatTime(result.last_received_at ?? result.feed?.last_event_at ?? undefined)}</dd></div>
+      </dl>
+      <p className="dhan-status-footnote">Checked {formatTime(result.checked_at)} · credentials are never shown here.</p>
+    </> : null}
+  </section>;
 }
 
 function Brand() {
