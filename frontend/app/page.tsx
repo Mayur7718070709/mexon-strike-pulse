@@ -1,27 +1,53 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
+import { authenticatedFetch } from "../lib/api";
+import { OptionChainPanel } from "./option-chain";
+import { HistoricalAdminPanel } from "./historical-admin";
+import { PastPresentNextFuturePanel } from "./analysis";
+import { AlertsPanel, ScannerPanel, TargetTrackerPanel, WatchlistPanel } from "./product-panels";
 
+type Screen = "dashboard" | "market" | "options" | "scanner" | "historical" | "analysis" | "watchlist" | "targets" | "alerts" | "profile" | "settings";
 type Quote = { security_id: string; exchange_segment: string; last_price: number; exchange_timestamp: string; received_at: string; status: "LIVE" | "DATA STALE" };
-type MarketStatus = { status: "LIVE" | "DATA STALE" | "DATA UNAVAILABLE"; source: string; quotes: Quote[]; message?: string };
+type MarketStatus = { status: "LIVE" | "DATA STALE" | "CONNECTION LOST" | "DATA UNAVAILABLE"; source: string; quotes: Quote[]; message?: string };
+
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+const navigation: { id: Screen; label: string; icon: string; group: string }[] = [
+  { id: "dashboard", label: "Dashboard", icon: "⌂", group: "WORKSPACE" },
+  { id: "market", label: "Market overview", icon: "◫", group: "WORKSPACE" },
+  { id: "options", label: "Option chain", icon: "⇄", group: "MARKET TOOLS" },
+  { id: "scanner", label: "10X Scanner", icon: "⌕", group: "MARKET TOOLS" },
+  { id: "historical", label: "Historical analysis", icon: "▤", group: "MARKET TOOLS" },
+  { id: "analysis", label: "Past / Present / Next / Future", icon: "◷", group: "MARKET TOOLS" },
+  { id: "watchlist", label: "Watchlist", icon: "☆", group: "MY DATA" },
+  { id: "targets", label: "Target tracker", icon: "◎", group: "MY DATA" },
+  { id: "alerts", label: "Alerts", icon: "♢", group: "MY DATA" },
+  { id: "profile", label: "Profile", icon: "◉", group: "ACCOUNT" },
+  { id: "settings", label: "Settings", icon: "⚙", group: "ACCOUNT" },
+];
 
 function formatTime(value?: string) {
-  if (!value) return "—";
-  return new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Asia/Kolkata" }).format(new Date(value));
+  if (!value || Number.isNaN(new Date(value).getTime())) return "Unavailable";
+  return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "medium", timeZone: "Asia/Kolkata" }).format(new Date(value));
 }
 
 export default function Home() {
+  const [screen, setScreen] = useState<Screen>("dashboard");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [market, setMarket] = useState<MarketStatus | null>(null);
-  const [connection, setConnection] = useState<"loading" | "connected" | "unavailable">("loading");
+  const [connection, setConnection] = useState<"LOADING" | "LIVE" | "STALE" | "CONNECTION LOST" | "DATA UNAVAILABLE">("LOADING");
+  const [alertStream, setAlertStream] = useState<"CONNECTING" | "LIVE" | "CONNECTION LOST">("CONNECTING");
+  const [latestAlert, setLatestAlert] = useState<{ title: string; body: string } | null>(null);
+  const seenNotificationIds = useRef(new Set<string>());
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+
   useEffect(() => {
     if (!supabase) { setAuthLoading(false); return; }
     void supabase.auth.getSession().then(({ data }) => { setSession(data.session); setAuthLoading(false); });
@@ -30,43 +56,102 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const expireSession = () => { void supabase?.auth.signOut(); };
+    window.addEventListener("market-pulse:session-expired", expireSession);
+    return () => window.removeEventListener("market-pulse:session-expired", expireSession);
+  }, []);
+
+  useEffect(() => {
     if (!session?.access_token) return;
     let active = true;
+    let socketConnected = false;
     const socketUrl = `${apiBase.replace(/^http/, "ws")}/ws/market`;
     const socket = new WebSocket(socketUrl, ["market-pulse", `access-token.${session.access_token}`]);
+    socket.onopen = () => { socketConnected = true; };
     socket.onmessage = (event) => {
       try {
         const quote = JSON.parse(event.data) as Quote;
-        if (!quote.security_id || typeof quote.last_price !== "number") return;
-        quote.status = "LIVE";
-        setMarket((previous) => ({ status: "LIVE", source: "DHANHQ", quotes: [...(previous?.quotes.filter((item) => item.security_id !== quote.security_id) ?? []), quote] }));
-        setConnection("connected");
-      } catch { /* Ignore malformed server frames; the REST status remains authoritative. */ }
+        if (!quote.security_id || typeof quote.last_price !== "number" || !Number.isFinite(quote.last_price)) return;
+        setMarket((previous) => ({ status: "LIVE", source: "DHANHQ", quotes: [...(previous?.quotes.filter((item) => item.security_id !== quote.security_id) ?? []), { ...quote, status: "LIVE" }] }));
+        setConnection("LIVE");
+      } catch { /* Malformed frames are ignored; REST status provides the current dependency state. */ }
     };
+    socket.onclose = () => { socketConnected = false; if (active) setConnection((current) => current === "LIVE" ? "CONNECTION LOST" : current); };
+    socket.onerror = () => { if (active) setConnection((current) => current === "LIVE" ? "CONNECTION LOST" : current); };
     const refresh = async () => {
       try {
-        const response = await fetch(`${apiBase}/market/status`, { cache: "no-store", headers: { Authorization: `Bearer ${session.access_token}` } });
-        if (!response.ok) throw new Error("API unavailable");
-        const result = (await response.json()) as MarketStatus;
-        if (active) { setMarket(result); setConnection("connected"); }
+        const response = await authenticatedFetch(`${apiBase}/market/status`, { cache: "no-store", headers: { Authorization: `Bearer ${session.access_token}` } });
+        if (response.status === 401) { await supabase?.auth.signOut(); return; }
+        if (!response.ok) throw new Error("Market API unavailable");
+        const result = await response.json() as MarketStatus;
+        if (!active) return;
+        setMarket(result);
+        if (result.status === "LIVE") setConnection("LIVE");
+        else if (result.status === "DATA STALE") setConnection("STALE");
+        else if (result.status === "CONNECTION LOST") setConnection("CONNECTION LOST");
+        else setConnection(socketConnected ? "CONNECTION LOST" : "DATA UNAVAILABLE");
       } catch {
-        if (active) { setConnection("unavailable"); setMarket({ status: "DATA UNAVAILABLE", source: "DHANHQ", quotes: [], message: "Market API is unreachable." }); }
+        if (active) {
+          setConnection(socketConnected ? "CONNECTION LOST" : "DATA UNAVAILABLE");
+          setMarket((previous) => previous?.quotes.length
+            ? { ...previous, status: "CONNECTION LOST", message: "Market API is unreachable. The last observation is retained with its original timestamps." }
+            : { status: "DATA UNAVAILABLE", source: "DHANHQ", quotes: [], message: "Market API is unreachable; no market values are available." });
+        }
       }
     };
     void refresh();
-    const timer = window.setInterval(refresh, 3000);
+    const timer = window.setInterval(refresh, 5000);
     return () => { active = false; window.clearInterval(timer); socket.close(); };
   }, [session?.access_token]);
 
+  useEffect(() => {
+    if (!session?.access_token) { setAlertStream("CONNECTING"); return; }
+    let active = true;
+    let reconnectTimer = 0;
+    let dismissTimer = 0;
+    let socket: WebSocket | null = null;
+    const connect = () => {
+      if (!active) return;
+      socket = new WebSocket(`${apiBase.replace(/^http/, "ws")}/ws/alerts`, ["market-pulse", `access-token.${session.access_token}`]);
+      socket.onopen = () => { if (active) setAlertStream("LIVE"); };
+      socket.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data) as { type?: string; notification_id?: string; title?: string; body?: string };
+          if (message.type !== "target_alert" || !message.title || !message.body) return;
+          if (message.notification_id && seenNotificationIds.current.has(message.notification_id)) return;
+          if (message.notification_id) seenNotificationIds.current.add(message.notification_id);
+          setLatestAlert({ title: message.title, body: message.body });
+          window.clearTimeout(dismissTimer);
+          dismissTimer = window.setTimeout(() => setLatestAlert(null), 10000);
+          window.dispatchEvent(new Event("market-pulse:target-alert"));
+        } catch { /* Inbox REST remains authoritative if a socket frame is malformed. */ }
+      };
+      socket.onerror = () => { if (active) setAlertStream("CONNECTION LOST"); };
+      socket.onclose = (event) => {
+        if (!active) return;
+        if (event.code === 1008) {
+          window.dispatchEvent(new Event("market-pulse:session-expired"));
+          return;
+        }
+        setAlertStream("CONNECTION LOST");
+        reconnectTimer = window.setTimeout(connect, 3000);
+      };
+    };
+    connect();
+    return () => { active = false; window.clearTimeout(reconnectTimer); window.clearTimeout(dismissTimer); socket?.close(); };
+  }, [session?.access_token]);
+
   const signIn = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setAuthError("");
+    event.preventDefault(); setAuthError("");
     if (!supabase) { setAuthError("Supabase Auth is not configured for this deployment."); return; }
     setAuthBusy(true);
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) setAuthError(error.message);
     setAuthBusy(false);
   };
+
+  const latestReceived = useMemo(() => market?.quotes.map((item) => item.received_at).filter(Boolean).sort().at(-1), [market]);
+  const status = session ? connection : "DATA UNAVAILABLE";
 
   if (authLoading) return <main className="auth-shell"><section className="auth-card"><Brand /><p className="subhead">Restoring your secure session…</p></section></main>;
   if (!session) return <main className="auth-shell"><section className="auth-card">
@@ -76,42 +161,55 @@ export default function Home() {
     <p className="auth-foot">Market data is provided by DhanHQ. Your session is protected by Supabase Auth.</p>
   </section></main>;
 
-  const status = connection === "unavailable" ? "DATA UNAVAILABLE" : market?.status ?? "DATA UNAVAILABLE";
-  return <main className="shell">
-    <header className="topbar">
+  const title = navigation.find((item) => item.id === screen)?.label ?? "Dashboard";
+  const isAdmin = session.user.app_metadata?.role === "admin";
+  const unavailableFeature = (feature: string, endpoint: string) => <section className="workspace-panel capability-empty"><span className="capability-icon">⌁</span><div><p className="eyebrow">BACKEND CAPABILITY</p><h2>{feature}</h2><p>This screen is waiting for the authenticated FastAPI endpoint <code>{endpoint}</code>. No sample or local-only records are shown.</p><span className="status-tag">DATA UNAVAILABLE</span></div></section>;
+
+  return <main className="app-shell">
+    <aside className="sidebar" aria-label="Application sidebar">
       <Brand />
-      <nav aria-label="Primary navigation"><a className="active" href="#overview">Overview</a><a href="#watchlist">Watchlist</a><a href="#options">Options</a></nav>
-      <button className="profile" aria-label="Sign out" title="Sign out" onClick={() => void supabase?.auth.signOut()}>{session.user.email?.slice(0, 2).toUpperCase() ?? "MI"}</button>
-    </header>
+      <div className="sidebar-scroll">{[...new Set(navigation.map((item) => item.group))].map((group) => <div className="nav-group" key={group}>
+        <p className="nav-group-label">{group}</p>{navigation.filter((item) => item.group === group).map((item) => <button key={item.id} type="button" className={`nav-item ${screen === item.id ? "selected" : ""}`} onClick={() => setScreen(item.id)} aria-current={screen === item.id ? "page" : undefined}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}
+      </div>)}</div>
+      <div className="sidebar-bottom"><div className="sidebar-status"><i className={`status-indicator state-${status.toLowerCase().replaceAll(" ", "-")}`} /><span>{status}</span><small>DHANHQ · {formatTime(latestReceived)}</small></div><button type="button" className="signout-button" onClick={() => void supabase?.auth.signOut()}><span className="avatar">{session.user.email?.slice(0, 2).toUpperCase() ?? "MI"}</span><span className="account-label">{session.user.email ?? "Account"}<small>Sign out</small></span><span aria-hidden="true">↗</span></button></div>
+    </aside>
 
-    <section className="intro" id="overview">
-      <div><p className="eyebrow">NSE MARKET <span>·</span> LIVE DATA</p><h1>Market overview</h1><p className="subhead">Your live view of the market, in one place.</p></div>
-      <div className={`feed-pill ${status === "LIVE" ? "is-live" : ""}`}><span className="feed-dot" />{status}<span className="feed-source">DHANHQ</span></div>
-    </section>
+    <div className="main-column">
+      <header className="mobile-header"><Brand /><button type="button" aria-label="Sign out" onClick={() => void supabase?.auth.signOut()} className="avatar">{session.user.email?.slice(0, 2).toUpperCase() ?? "MI"}</button></header>
+      <header className="page-topbar"><div><p className="eyebrow">MARKET PULSE <span>·</span> DHANHQ DATA</p><h1>{title}</h1></div><div className={`global-status status-${status.toLowerCase().replaceAll(" ", "-")}`}><i />{status}</div></header>
 
-    <section className="notice" role="status" aria-live="polite">
-      <span className="notice-icon">i</span><span><strong>{status}</strong>{market?.message ? ` — ${market.message}` : status === "DATA STALE" ? " — Last received quotes are outside the freshness window." : status === "LIVE" ? " — Receiving DhanHQ market feed." : " — Waiting for a verified DhanHQ market feed."}</span>
-      <span className="updated">Updated {formatTime(market?.quotes[0]?.received_at)}</span>
-    </section>
+      <div className="content-area">
+        {(screen === "dashboard" || screen === "market") && <>
+          <section className="welcome-row"><div><p className="eyebrow">{screen === "market" ? "NSE MARKET" : "MARKET SESSION"}</p><h2>{screen === "market" ? "Market overview" : "Your market, at a glance."}</h2><p>Provider-confirmed observations only. Prices retain their source timestamps.</p></div><div className="last-update"><span>LAST RECEIVED</span><strong>{formatTime(latestReceived)}</strong></div></section>
+          <section className="metric-grid" aria-label="Market status summary"><article className="metric-card"><span>FEED STATUS</span><strong className={`metric-${status.toLowerCase().replaceAll(" ", "-")}`}>{status}</strong><small>Verified backend feed state</small></article><article className="metric-card"><span>OBSERVATIONS</span><strong>{market?.quotes.length ?? "—"}</strong><small>Quotes currently available</small></article><article className="metric-card"><span>DATA SOURCE</span><strong>DHANHQ</strong><small>Live values only; no simulation</small></article></section>
+          <section className="workspace-panel quotes-panel"><div className="content-heading"><div><p className="eyebrow">MARKET SNAPSHOT</p><h2>Live observations</h2></div><span className={`status-tag ${status === "LIVE" ? "tag-live" : ""}`}>{status}</span></div>
+            {market?.quotes.length ? <div className="live-quote-grid">{market.quotes.map((quote) => <article className="live-quote" key={`${quote.exchange_segment}:${quote.security_id}`}><div className="quote-heading"><span className="quote-symbol">{quote.security_id}</span><span className="quote-segment">{quote.exchange_segment}</span></div><strong className="quote-price">₹{quote.last_price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><div className="quote-times"><span>Source time <b>{formatTime(quote.exchange_timestamp)}</b></span><span>Received <b>{formatTime(quote.received_at)}</b></span></div><span className={`quote-freshness ${quote.status === "LIVE" && status === "LIVE" ? "fresh" : ""}`}>{status === "LIVE" ? quote.status : status}</span></article>)}</div> : <EmptyState title={status === "LOADING" ? "Connecting to DhanHQ" : "No live observations"} message={market?.message ?? "No provider-confirmed quotes are available. Instruments will appear only when returned by the Dhan feed."} status={status} />}
+          </section>
+          {screen === "dashboard" && <><ScannerPanel accessToken={session.access_token} apiBase={apiBase} compact /><div className="dashboard-two-col"><TargetTrackerPanel accessToken={session.access_token} apiBase={apiBase} compact /></div></>}
+        </>}
 
-    <section className="section-heading" id="watchlist"><div><p className="eyebrow">YOUR MARKETS</p><h2>Watchlist</h2></div><span className="count">{market?.quotes.length ?? 0} instruments</span></section>
-    <section className="quote-grid" aria-label="Live market quotes">
-      {market?.quotes.length ? market.quotes.map((quote) => <article className="quote-card" key={quote.security_id}>
-        <div className="quote-card-top"><span className="instrument-icon">◈</span><span className={`mini-status ${quote.status === "LIVE" ? "is-live" : ""}`}><i />{quote.status}</span></div>
-        <p className="symbol">Security {quote.security_id}</p><p className="exchange">DHANHQ · {quote.exchange_segment}</p>
-        <div className="price-row"><strong>{quote.last_price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><span>INR</span></div>
-        <div className="card-footer"><span>Exchange time</span><span>{formatTime(quote.exchange_timestamp)}</span></div>
-      </article>) : <article className="empty-card"><span className="empty-mark">⌁</span><div><strong>{connection === "loading" ? "Connecting to market data" : "Your watchlist is ready"}</strong><p>{market?.message ?? "Live instruments will appear here when DhanHQ data is available."}</p></div><span className="empty-state">{status}</span></article>}
-    </section>
-
-    <section className="bottom-grid" id="options">
-      <article className="panel"><div className="panel-title"><div><p className="eyebrow">MARKET SNAPSHOT</p><h2>Index performance</h2></div><span className="source-label">DHANHQ LIVE</span></div><div className="empty-chart"><div className="chart-lines"><i /><i /><i /><i /></div><span>{status === "LIVE" ? "Index instruments are not configured" : "Live index data will appear here"}</span></div></article>
-      <article className="panel options-panel"><div className="panel-title"><div><p className="eyebrow">DERIVATIVES</p><h2>Options pulse</h2></div><span className="options-glyph">⌘</span></div><div className="options-placeholder"><div className="option-row"><span>Put / Call ratio</span><b>—</b></div><div className="option-row"><span>Max pain</span><b>—</b></div><div className="option-row"><span>Open interest</span><b>—</b></div><p>Configure live option instruments to enable this view.</p></div></article>
-    </section>
-    <footer><span>© 2026 Mexon Intelligence Pvt Ltd</span><span><i className={`footer-dot ${status === "LIVE" ? "is-live" : ""}`} />{status} · Source: DhanHQ v2</span></footer>
+        {screen === "options" && <OptionChainPanel accessToken={session.access_token} apiBase={apiBase} />}
+        {screen === "watchlist" && <WatchlistPanel accessToken={session.access_token} apiBase={apiBase} />}
+        {screen === "scanner" && <ScannerPanel accessToken={session.access_token} apiBase={apiBase} />}
+        {screen === "analysis" && <PastPresentNextFuturePanel accessToken={session.access_token} apiBase={apiBase} />}
+        {screen === "historical" && (isAdmin ? <HistoricalAdminPanel accessToken={session.access_token} apiBase={apiBase} /> : unavailableFeature("Historical analysis and coverage", "GET /api/v1/admin/historical/coverage"))}
+        {screen === "targets" && <TargetTrackerPanel accessToken={session.access_token} apiBase={apiBase} />}
+        {screen === "alerts" && <AlertsPanel accessToken={session.access_token} apiBase={apiBase} streamStatus={alertStream} />}
+        {screen === "profile" && <section className="workspace-panel profile-panel"><div className="content-heading"><div><p className="eyebrow">AUTHENTICATED ACCOUNT</p><h2>Profile</h2></div><span className="status-tag tag-live">SUPABASE AUTH</span></div><dl><div><dt>Email</dt><dd>{session.user.email ?? "Unavailable"}</dd></div><div><dt>User ID</dt><dd>{session.user.id}</dd></div><div><dt>Session</dt><dd>Protected Supabase session · expires {formatTime(session.expires_at ? new Date(session.expires_at * 1000).toISOString() : undefined)}</dd></div></dl><button type="button" className="secondary-button" onClick={() => void supabase?.auth.signOut()}>Sign out securely</button></section>}
+        {screen === "settings" && <>{unavailableFeature("Personal preferences", "GET /api/v1/user/preferences")}<section className="workspace-panel settings-security"><p className="eyebrow">SESSION SECURITY</p><h2>Authentication</h2><p>Market API requests use your Supabase access token. Expired or rejected sessions return to sign-in. Dhan credentials remain on the backend.</p><button type="button" className="secondary-button" onClick={() => void supabase?.auth.signOut()}>Sign out securely</button></section></>}
+      </div>
+      <footer className="app-footer"><span>© 2026 Mexon Intelligence Pvt Ltd</span><span><i className={`status-indicator state-${status.toLowerCase().replaceAll(" ", "-")}`} />{status} · DhanHQ v2</span></footer>
+      {latestAlert && <aside className="target-alert-toast" role="status" aria-live="assertive"><span aria-hidden="true">◆</span><div><strong>{latestAlert.title}</strong><p>{latestAlert.body}</p><button type="button" className="text-button" onClick={() => { setScreen("alerts"); setLatestAlert(null); }}>Open alerts</button></div><button type="button" className="toast-dismiss" aria-label="Dismiss alert notification" onClick={() => setLatestAlert(null)}>×</button></aside>}
+      {mobileMenuOpen && <nav className="mobile-more-menu" aria-label="More screens">{navigation.filter((item) => !["dashboard", "options", "scanner", "watchlist"].includes(item.id)).map((item) => <button key={item.id} type="button" onClick={() => { setScreen(item.id); setMobileMenuOpen(false); }}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}</nav>}
+      <nav className="mobile-nav" aria-label="Mobile navigation">{navigation.filter((item) => ["dashboard", "options", "scanner", "watchlist"].includes(item.id)).map((item) => <button key={item.id} type="button" onClick={() => { setScreen(item.id); setMobileMenuOpen(false); }} className={screen === item.id ? "selected" : ""} aria-current={screen === item.id ? "page" : undefined}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}<button type="button" className={mobileMenuOpen || !["dashboard", "options", "scanner", "watchlist"].includes(screen) ? "selected" : ""} aria-expanded={mobileMenuOpen} aria-label="More screens" onClick={() => setMobileMenuOpen((open) => !open)}><span aria-hidden="true">⋯</span>More</button></nav>
+    </div>
   </main>;
 }
 
+function EmptyState({ title, message, status }: { title: string; message: string; status: string }) {
+  return <div className="empty-state-panel" role="status" aria-live="polite"><span className="empty-state-mark">⌁</span><div><strong>{title}</strong><p>{message}</p></div><span className="status-tag">{status}</span></div>;
+}
+
 function Brand() {
-  return <a className="brand" href="#overview" aria-label="Market Pulse home"><span className="brand-mark">M</span><span>MARKET<span className="brand-light">PULSE</span><small>BY MEXON INTELLIGENCE</small></span></a>;
+  return <a className="brand" href="#dashboard" aria-label="Market Pulse"><span className="brand-mark">M</span><span>MARKET<span className="brand-light">PULSE</span><small>BY MEXON INTELLIGENCE</small></span></a>;
 }

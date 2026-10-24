@@ -9,6 +9,7 @@ class DhanConfig:
     access_token: str
     base_url: str = "https://api.dhan.co/v2"
     timeout_seconds: float = 5.0
+    cache_enabled: bool = False
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "DhanConfig":
@@ -16,6 +17,7 @@ class DhanConfig:
             client_id=settings.dhan_client_id.strip(),
             access_token=settings.dhan_access_token.strip(),
             timeout_seconds=settings.dhan_http_timeout_seconds,
+            cache_enabled=settings.dhan_cache_enabled,
         )
 
     @property

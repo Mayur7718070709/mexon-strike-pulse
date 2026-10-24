@@ -25,6 +25,14 @@ async def require_user(credentials: HTTPAuthorizationCredentials | None = Depend
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Supabase Auth validation is unavailable") from exc
 
 
+async def require_admin(user: dict = Depends(require_user)) -> dict:
+    """Admin authorization comes only from trusted Supabase app_metadata claims."""
+    app_metadata = user.get("app_metadata") or {}
+    if not isinstance(app_metadata, dict) or app_metadata.get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access required")
+    return user
+
+
 async def decode_supabase_token(token: str) -> dict:
     settings = get_settings()
     if not settings.supabase_url:
@@ -46,11 +54,21 @@ async def decode_supabase_token(token: str) -> dict:
         user = response.json()
         if not user.get("id"):
             raise InvalidTokenError("Supabase session has no user ID")
-        return {"id": user["id"], "email": user.get("email")}
+        # Supabase already validated this token through /user. Retain its
+        # expiry claim so long-lived sockets can close when the session expires.
+        expiry = jwt.decode(token, options={"verify_signature": False}).get("exp")
+        return {"id": user["id"], "email": user.get("email"), "app_metadata": user.get("app_metadata", {}),
+                "expires_at": expiry}
     else:
         jwks = PyJWKClient(f"{issuer}/.well-known/jwks.json")
         signing_key = await asyncio.to_thread(jwks.get_signing_key_from_jwt, token)
         claims = jwt.decode(token, signing_key.key, algorithms=["ES256", "RS256", "EdDSA"], audience="authenticated", issuer=issuer)
     if not claims.get("sub"):
         raise InvalidTokenError("Token has no subject")
-    return {"id": claims["sub"], "email": claims.get("email")}
+    return {
+        "id": claims["sub"],
+        "email": claims.get("email"),
+        "expires_at": claims.get("exp"),
+        # app_metadata is server-managed in Supabase; user_metadata is not trusted for authorization.
+        "app_metadata": claims.get("app_metadata", {}),
+    }

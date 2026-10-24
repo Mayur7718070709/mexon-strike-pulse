@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     dhan_client_id: str = ""
     dhan_access_token: str = ""
     dhan_http_timeout_seconds: float = 5.0
+    dhan_cache_enabled: bool = False
     dhan_instruments: str = ""
     dhan_feed_mode: str = "ticker"
     market_data_stale_after_seconds: int = 15

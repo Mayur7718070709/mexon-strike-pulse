@@ -1,6 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import "./styles.css";
+import "./analysis.css";
 import "./auth.css";
+import "./historical-admin.css";
+import "./workspace.css";
 
 export const metadata: Metadata = {
   title: "Market Pulse | Mexon Intelligence",
