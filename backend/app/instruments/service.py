@@ -184,23 +184,55 @@ class InstrumentSyncService:
                 else:
                     option_rows[key] = item
 
-        # Prefer a matching NSE root row. When Dhan's option row declares an
-        # underlying ID but the root row is absent/misaligned, the documented
-        # underlying fields remain provider evidence for the identity.
-        eligible_roots = []
-        root_keys = set()
-        for root in root_candidates.values():
-            key = (root["root_symbol"], root["exchange_segment"], root["security_id"])
-            if key in derivative_roots:
-                eligible_roots.append(root)
-                root_keys.add(key)
-        for key, root in derivative_roots.items():
-            if key not in root_keys:
-                eligible_roots.append(root)
-                root_keys.add(key)
-        allowed_keys = root_keys
-        valid_options = [item for item in option_rows.values()
-                         if (item["underlying_symbol"], item["underlying_segment"], item["underlying_security_id"]) in allowed_keys]
+        # Dhan's detailed file can declare a derivative UNDERLYING_SECURITY_ID
+        # that differs from the standalone root instrument's SECURITY_ID (for
+        # example, BANKNIFTY). Option-chain endpoints require the root
+        # instrument ID. Prefer an exact root match; when that is absent, use a
+        # same-symbol/segment root only if the master contains exactly one.
+        # Keep the provider-declared derivative ID as a fallback only when no
+        # standalone root exists, and skip ambiguous root matches.
+        roots_by_symbol_segment: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+        for key, root in root_candidates.items():
+            roots_by_symbol_segment.setdefault((root["root_symbol"], root["exchange_segment"]), []).append(key)
+
+        canonical_roots: dict[tuple[str, str, str], dict] = {}
+        canonical_underlying_key: dict[tuple[str, str, str], tuple[str, str, str]] = {}
+        ambiguous_underlyings: set[tuple[str, str, str]] = set()
+        for declared_key, derivative_root in derivative_roots.items():
+            if declared_key in root_candidates:
+                canonical_key = declared_key
+                canonical_root = root_candidates[canonical_key]
+            else:
+                candidates = roots_by_symbol_segment.get((declared_key[0], declared_key[1]), [])
+                if len(candidates) == 1:
+                    canonical_key = candidates[0]
+                    canonical_root = root_candidates[canonical_key]
+                elif len(candidates) > 1:
+                    ambiguous_underlyings.add(declared_key)
+                    continue
+                else:
+                    canonical_key = declared_key
+                    canonical_root = derivative_root
+            canonical_underlying_key[declared_key] = canonical_key
+            canonical_roots[canonical_key] = canonical_root
+
+        if ambiguous_underlyings:
+            log.warning("dhan_instrument_master_ambiguous_underlyings",
+                        count=len(ambiguous_underlyings),
+                        symbols=sorted({key[0] for key in ambiguous_underlyings})[:24])
+
+        valid_options = []
+        for item in option_rows.values():
+            declared_key = (item["underlying_symbol"], item["underlying_segment"], item["underlying_security_id"])
+            canonical_key = canonical_underlying_key.get(declared_key)
+            if canonical_key is None:
+                continue
+            # Carry forward the canonical ID from the official root row so the
+            # option-chain/expiry service resolves the same ID Dhan expects.
+            item["underlying_security_id"] = canonical_key[2]
+            valid_options.append(item)
+
+        eligible_roots = list(canonical_roots.values())
         if source_count == 0:
             raise InstrumentMasterError("Dhan detailed instrument master is empty.")
         log.info(
@@ -211,10 +243,11 @@ class InstrumentSyncService:
                                 for key, count in instrument_classes.most_common(24)],
             root_candidates=len(root_candidates),
             derivative_root_identities=len(derivative_roots),
-            fallback_root_identities=sum(1 for key in derivative_roots if key not in {
-                (root["root_symbol"], root["exchange_segment"], root["security_id"])
-                for root in root_candidates.values()
-            }),
+            fallback_root_identities=sum(1 for declared_key, canonical_key in canonical_underlying_key.items()
+                                         if declared_key == canonical_key and declared_key not in root_candidates),
+            canonicalized_underlying_identities=sum(1 for declared_key, canonical_key in canonical_underlying_key.items()
+                                                    if declared_key != canonical_key),
+            ambiguous_underlying_identities=len(ambiguous_underlyings),
             root_symbols=sorted({item["root_symbol"] for item in root_candidates.values()})[:24],
             derivative_underlyings=sorted(symbol for symbol, _, _ in derivative_underlyings)[:24],
             index_option_symbols=sorted(index_option_symbols),
